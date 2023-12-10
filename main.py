@@ -138,15 +138,91 @@ def find_attributes_by_name(clazz, attributes, name: bytes):
     return [attr 
             for attr in main['attributes']
             if clazz['constant_pool'][attr['attribute_name_index'] - 1]['bytes'] == name]
-    
-clazz = parse_class_file("./Main.class")
-[main] = find_methods_by_name(clazz, b"main")
-[code] = find_attributes_by_name(clazz, main['attributes'], b'Code')
 
-with io.BytesIO(code['info']) as f:
+def parse_code_info(info: bytes):
   code = {}
-  code['max_stack'] = parse_u2(f)
-  code['max_locals'] = parse_u2(f)
-  code_length = parse_u4(f)
-  pp.pprint(f.read(code_length))
-  pp.pprint(code_length)
+  with io.BytesIO(info) as f:
+    code['max_stack'] = parse_u2(f)
+    code['max_locals'] = parse_u2(f)
+    code_length = parse_u4(f)
+    code['code'] = f.read(code_length)
+    exception_table_length = parse_u2(f)
+    for i in range(exception_table_length):
+      assert False, 'Parsing exception table is not implemented'
+    attributes_count = parse_u2(f)
+    code['attributes'] = parse_attributes(f, attributes_count)
+    return code
+
+getstatic_opcode = 0xB2
+ldc_opcode = 0x12
+invokevirtual_opcode = 0xB6
+return_opcode = 0xB1
+bipush_opcode = 0x10
+
+def get_name_of_class(clazz, clazz_index):
+  return clazz['constant_pool'][clazz['constant_pool'][clazz_index - 1]['name_index'] - 1]['bytes']
+
+def get_name_of_member(clazz, name_and_type_index):
+  return clazz['constant_pool'][clazz['constant_pool'][name_and_type_index - 1]['name_index'] - 1]['bytes']
+
+def type_of(frame):
+  if frame['type'] == 'FakePrintStream':
+    return b'java/io/PrintStream'
+  else:
+    assert False, f'type_of is not implemented {frame}'
+
+def execute_code(clazz, code: bytes):
+  stack = []
+  with io.BytesIO(code) as f:
+      while f.tell() < len(code):
+         opcode = parse_u1(f)
+         if opcode == getstatic_opcode:
+            index = parse_u2(f)
+            fieldref = clazz['constant_pool'][index - 1]
+            name_of_class = get_name_of_class(clazz, fieldref['class_index'])
+            name_of_member = get_name_of_member(clazz, fieldref['name_and_type_index'])
+            if name_of_class == b'java/lang/System' and name_of_member == b'out':
+               stack.append({'type':'FakePrintStream'})
+            else:
+               assert False, f'Unknown member {name_of_class}/{name_of_member} in getstatic instruction'
+         elif opcode == ldc_opcode:
+            index = parse_u1(f)
+            stack.append({'type': 'Constant', 'const': clazz['constant_pool'][index - 1]})
+         elif opcode == invokevirtual_opcode:
+            index = parse_u2(f)
+            methodref = clazz['constant_pool'][index - 1]
+            name_of_class = get_name_of_class(clazz, methodref['class_index'])
+            name_of_member = get_name_of_member(clazz, methodref['name_and_type_index'])
+            if name_of_class == b'java/io/PrintStream' and name_of_member == b'println':
+               n = len(stack)
+               if len(stack) < 2:
+                  assert False, f'{name_of_class}/{name_of_member} expected 2 arguments, but provided {n}'
+               obj = stack[len(stack) - 2]
+               typ = type_of(obj)
+               if typ != b'java/io/PrintStream':
+                 assert False, 'expected type java/io/PrintStream but got {typ}'
+               arg = stack[len(stack) - 1]
+               if arg['type'] == 'Constant':
+                 if arg['const']['tag'] == 'CONSTANT_String':
+                    print(clazz['constant_pool'][arg['const']['string_index'] - 1]['bytes'].decode('utf-8'))
+                 else:
+                    assert False, f"support for {arg['const']['tag']} is not implemented"
+               elif arg['type'] == 'Integer':
+                 print(arg['value'])
+               else:
+                 assert False, f"support for {arg['type']} is not implemented"
+            else:
+               assert False, f'Unknown method {name_of_class}/{name_of_member} in invokevirtual instruction'
+         elif opcode == return_opcode:
+            return
+         elif opcode == bipush_opcode:
+            byte = parse_u1(f)
+            stack.append({'type': 'Integer', 'value': byte})
+         else:
+            assert False, f"Unknown opcode 0x{hex(opcode)}"
+
+clazz = parse_class_file("./Main.class")
+[main] = find_methods_by_name(clazz, b'main')
+[code] = find_attributes_by_name(clazz, main['attributes'], b'Code')
+code_attrib = parse_code_info(code['info'])
+execute_code(clazz, code_attrib['code'])
